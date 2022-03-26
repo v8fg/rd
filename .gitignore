@@ -12,4 +12,13 @@
 *.out
 
 # Dependency directories (remove the comment below to include it)
-# vendor/
+vendor/
+
+.vscode/
+.idea/
+!.gitkeep
+
+# ignore the vscode temp files
+*.inp
+*.oac
+.DS_Store
