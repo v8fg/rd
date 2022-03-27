@@ -3,12 +3,12 @@ package main
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"time"
 
 	clientV3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/v8fg/rd"
-	"github.com/v8fg/rd/internal/registering/etcd"
 )
 
 var (
@@ -22,20 +22,22 @@ var (
 			fmt.Printf("messages consume, count:%v, content:%v\n", len(messages), message)
 		}
 	}
-	// logger = log.New(log.Writer(), "[rd-test] ", log.LstdFlags|log.Llongfile)
-	logger = log.New(log.Writer(), "[rd-test-register] ", log.LstdFlags|log.Lshortfile)
+	// logger = log.New(log.Writer(), "[rd-test-register] ", log.LstdFlags|log.Lshortfile)
+	logger = log.New(log.Writer(), "[rd-test-register] ", log.LstdFlags)
 )
 
-var cfg = etcd.Config{
-	ServiceKey:        fmt.Sprintf("/services/test/v1.0/grpc/127.0.0.1:99%v", time.Now().Second()),
-	ServiceVal:        "first" + time.Now().Format("20060102150405"),
-	TTL:               time.Second * 15,
-	KeepAliveInterval: time.Second * 6,
-	ChannelBufferSize: 4,
-	ErrorsHandler:     errorsHandler,
-	MessagesHandler:   messagesHandler,
-	MutableVal:        true,
-	Logger:            logger,
+var cfg = rd.RegisterConfig{
+	Name: "my-rd-test-register" + time.Now().Format("200601021504"),
+	Key:  fmt.Sprintf("/services/test/v1.0/grpc/127.0.0.1:33%v", time.Now().Second()+int(rand.Int31n(300))),
+	Val:  "first" + time.Now().Format("20060102150405"),
+	TTL:  time.Second * 15,
+	CommonConfig: rd.CommonConfig{
+		ChannelBufferSize: 64,
+		ErrorsHandler:     errorsHandler,
+		MessagesHandler:   messagesHandler,
+		Logger:            logger,
+	},
+	MutableVal: true,
 	// KeepAliveMode:     1,
 }
 
@@ -45,11 +47,13 @@ func main() {
 }
 
 func initRegisterETCD() {
-
 	// cfg.Return.Errors = true
 	// cfg.Return.Messages = true
+	cfg.KeepAlive.Interval = time.Second * 8
+	// cfg.KeepAlive.Mode = 0
+	// cfg.Logger = logger
 
-	err := rd.RegisterEtcd(&cfg, nil, clientV3.Config{
+	err := rd.RegisterEtcd(&cfg, nil, &clientV3.Config{
 		Endpoints:   []string{"127.0.0.1:2379"},
 		DialTimeout: time.Second * 5,
 	})
@@ -66,7 +70,7 @@ func runRegister() {
 		panic(errs)
 		return
 	}
-	tk := time.NewTicker(time.Second * 3)
+	tk := time.NewTicker(time.Second * 20)
 	defer tk.Stop()
 
 	done := make(chan struct{})
@@ -80,17 +84,18 @@ loop:
 	for {
 		select {
 		case <-tk.C:
-			cfg.ServiceVal = fmt.Sprintf("127.0.0.1:80%v", time.Now().Second())
+			newVal := fmt.Sprintf("127.0.0.1:33%v", time.Now().Second()+int(rand.Int31n(300)))
+			err := rd.RegisterUpdateVal(cfg.Name, newVal)
+			log.Printf("ticker update val:%v, err:%v\n", newVal, err)
 		case <-done:
 			errs := rd.RegisterClose()
 			if len(errs) != 0 {
 				panic(fmt.Sprintf("close err:%+v", errs))
-				return
 			}
 			fmt.Printf("close success")
 			break loop
 		}
-		log.Println("out select, but in for loop")
+		// log.Println("out select, but in for loop")
 	}
 	log.Println("all is done")
 }

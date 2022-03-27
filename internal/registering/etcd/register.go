@@ -13,19 +13,26 @@ import (
 	clientV3 "go.etcd.io/etcd/client/v3"
 )
 
+const moduleName = "register-etcd"
+
 type none struct{}
 
 // Config is used to pass multiple configuration options to register's constructors.
 // Watch out the Immutable set, allow override your KV, shall use default value false.
 type Config struct {
-	ServiceKey        string // register key/name, unique, must not update.
-	ServiceVal        string
-	TTL               time.Duration
-	KeepAliveInterval time.Duration // shall less than ttl - 1s ,at least
-	ChannelBufferSize int           // default 256, for errors or messages channel
-	KeepAliveMode     uint8         // 0=ticker(default, KeepAliveOnce), 1=KeepAlive
+	Name string // the name for store the instance, unique. If empty will use Key replace.
+	Key  string // register key, unique. The format maybe like: /{scheme}/{service}/{endPoint}.
+	Val  string
+	TTL  time.Duration
 
-	canCloseClient bool // If you use input client will true, else false.
+	ChannelBufferSize int  // default 256, for errors or messages channel
+	MutableVal        bool // If true you can override the 'Val', default false. Pls watch out other items shall not change, so dangerous.
+
+	KeepAlive struct {
+		Interval time.Duration // default 1s, at least >=100ms, better < TTL, invalid will set TTL-1
+		Mode     uint8         // 0=ticker(default, KeepAliveOnce), 1=KeepAlive
+	}
+
 	// Return specifies what will be populated. If they are set to true,
 	// you must read from them to prevent deadlock.
 	Return struct {
@@ -36,7 +43,7 @@ type Config struct {
 		// the Messages channel (default disabled).
 		Messages bool
 	}
-	MutableVal      bool                       // If true you can override the 'ServiceVal', default false. Pls watch out other items shall not change, so dangerous.
+
 	ErrorsHandler   func(err <-chan error)     // consume errors, if not set drop.
 	MessagesHandler func(string <-chan string) // consume messages expect errors, if not set drop.
 	Logger          *log.Logger                // shall not set, use for debug
@@ -48,10 +55,13 @@ type register struct {
 	errors   chan error
 	messages chan string
 
-	ctx       context.Context
-	lock      sync.RWMutex
-	closed    chan none
-	closeOnce sync.Once
+	uniKey string // format like: /{scheme}/{service}/{endPoint}.
+
+	ctx            context.Context
+	lock           sync.RWMutex
+	closed         chan none
+	closeOnce      sync.Once
+	canCloseClient bool // If you use input client will true, else false.
 
 	curServiceVal string           // used for updating the old val, if set MutableVal=true
 	leaseID       clientV3.LeaseID // auto generate, lease
@@ -64,28 +74,32 @@ func newRegister(client *clientV3.Client, config *Config) (*register, error) {
 		config:        config,
 		errors:        make(chan error, config.ChannelBufferSize),
 		messages:      make(chan string, config.ChannelBufferSize),
+		uniKey:        config.Key, // copy to avoid update this.
 		ctx:           context.Background(),
 		closed:        make(chan none),
-		curServiceVal: config.ServiceVal,
+		curServiceVal: config.Val,
 	}, nil
 }
 
 // NewRegister creates a new register with the given configurations.
 // Input client preferred, if nil will create with etcdConfig.
-func NewRegister(config *Config, client *clientV3.Client, etcdConfig clientV3.Config) (*register, error) {
+func NewRegister(config *Config, client *clientV3.Client, etcdConfig *clientV3.Config) (*register, error) {
 	err := checkConfig(config)
 	if err != nil {
-		return nil, fmt.Errorf("NewRegister err: %w", err)
+		return nil, fmt.Errorf("[%s] NewRegister err: %w", moduleName, err)
 	}
 
+	canCloseClient := false
 	if client == nil {
-		client, err = newClient(etcdConfig)
-		if err != nil {
-			return nil, fmt.Errorf("NewRegister create : %w", err)
+		if etcdConfig == nil {
+			return nil, fmt.Errorf("[%s] NewRegister err: %w", moduleName, errors.New("client and etcdConfig, both nil"))
 		}
-		config.canCloseClient = true
-	} else {
-		config.canCloseClient = false
+
+		client, err = newClient(*etcdConfig)
+		if err != nil {
+			return nil, fmt.Errorf("[%s] NewRegister create : %w", moduleName, err)
+		}
+		canCloseClient = true
 	}
 
 	// watch out &config
@@ -94,19 +108,25 @@ func NewRegister(config *Config, client *clientV3.Client, etcdConfig clientV3.Co
 		_ = client.Close()
 		return nil, err
 	}
+
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	r.canCloseClient = canCloseClient
+
 	return r, err
 }
 
 func newClient(config clientV3.Config) (*clientV3.Client, error) {
 	client, err := clientV3.New(config)
 	if err != nil {
-		return nil, fmt.Errorf("create etcd client err: %w", err)
+		return nil, fmt.Errorf("[%s] create etcd client err: %w", moduleName, err)
 	}
 
 	// fetch memberList
 	_, err = client.MemberList(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("fetch memberList err: %w", err)
+		return nil, fmt.Errorf("[%s] fetch etcd memberList err: %w", moduleName, err)
 	}
 
 	return client, err
@@ -114,27 +134,27 @@ func newClient(config clientV3.Config) (*clientV3.Client, error) {
 
 func checkConfig(config *Config) error {
 	if config == nil {
-		return errors.New("checkConfig failed, config nil")
+		return fmt.Errorf("[%s] checkConfig failed, config nil", moduleName)
 	}
-	if len(config.ServiceKey) == 0 {
-		return errors.New("checkConfig failed, ServiceKey empty")
+	if len(config.Key) == 0 {
+		return fmt.Errorf("[%s] checkConfig failed, Key empty", moduleName)
 	}
-	if len(config.ServiceVal) == 0 {
-		return errors.New("checkConfig failed, ServiceVal empty")
+	if len(config.Val) == 0 {
+		return fmt.Errorf("[%s] checkConfig failed, Val empty", moduleName)
 	}
 	if config.TTL <= time.Second {
 		config.TTL = time.Second
 	}
-	if config.KeepAliveInterval >= config.TTL {
-		config.KeepAliveInterval = config.TTL - time.Second
+	if config.KeepAlive.Interval >= config.TTL {
+		config.KeepAlive.Interval = config.TTL - time.Second
 	}
-	if config.KeepAliveInterval <= time.Second {
-		config.KeepAliveInterval = time.Second
+	if config.KeepAlive.Interval < 100*time.Millisecond {
+		config.KeepAlive.Interval = time.Second
 	}
-	if config.KeepAliveMode == 1 {
-		config.KeepAliveMode = 1
+	if config.KeepAlive.Mode == 1 {
+		config.KeepAlive.Mode = 1
 	} else {
-		config.KeepAliveMode = 0
+		config.KeepAlive.Mode = 0
 	}
 	if config.ChannelBufferSize <= 0 {
 		config.ChannelBufferSize = 256
@@ -172,13 +192,26 @@ func (r *register) Run() error {
 
 	err := r.register()
 	if err != nil {
-		panic(fmt.Errorf("register key:%v, err: %w", r.config.ServiceKey, err))
+		panic(fmt.Errorf("[%s] register name:%s, key:%s, err: %w", moduleName, r.config.Name, r.uniKey, err))
 	}
+
+	r.start = time.Now()
 
 	r.initHandlerAndLogger()
 	err = r.keepAliveChoose()
-	r.start = time.Now()
 	return err
+}
+
+// Update the store val, shall not call, if no necessary.
+func (r *register) Update(val string) error {
+	if !r.config.MutableVal {
+		return fmt.Errorf("[%s] no permit to update val, as your init MutableVal is false", moduleName)
+	}
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	r.curServiceVal = val // judge the change by curServiceVal; config.Val can auto update.
+	return nil
 }
 
 // Errors implements Register and return errors.
@@ -193,15 +226,15 @@ func (r *register) Messages() <-chan string {
 
 // Close implements Register.
 func (r *register) Close() (err error) {
-	r.handlerMsg(fmt.Sprintf("register with serviceKey:%v, serviceVal:%v, has started:%v, will shutdown",
-		r.config.ServiceKey, r.curServiceVal, r.startedTime()))
+	r.handlerMsg(fmt.Sprintf("[%s] Close name:%s, key:%s, val:%s, startupTime:%s, uptime:%v, will shutdown",
+		moduleName, r.config.Name, r.uniKey, r.curServiceVal, r.startupTime(), r.uptime()))
 
 	r.closeOnce.Do(func() {
-		if r.config.canCloseClient && r.client.Close() != nil {
+		if r.canCloseClient && r.client.Close() != nil {
 			if e := r.client.Close(); e != nil {
 				err = e
-				r.handlerError(fmt.Errorf("register with serviceKey:%v, close clien error:%w",
-					r.config.ServiceKey, err))
+				r.handlerError(fmt.Errorf("[%s] Close name:%s, key:%s, close clien error:%w",
+					moduleName, r.config.Name, r.uniKey, err))
 			}
 		}
 
@@ -225,16 +258,22 @@ func (r *register) Close() (err error) {
 	return err
 }
 
-func (r *register) startedTime() time.Duration {
+// uptime already run time
+func (r *register) uptime() time.Duration {
 	return time.Now().Sub(r.start)
 }
 
+// startupTime the time Run at
+func (r *register) startupTime() string {
+	return r.start.Format("2006-01-02T15:04:05.000+0800")
+}
+
 func (r *register) keepAliveChoose() error {
-	if r.config.KeepAliveMode == 0 {
-		return r.keepAliveOnce(r.ctx, r.config.ServiceKey)
+	if r.config.KeepAlive.Mode == 0 {
+		return r.keepAliveOnce(r.ctx, r.uniKey)
 	}
 
-	return r.keepAlive(r.ctx, r.config.ServiceKey)
+	return r.keepAlive(r.ctx, r.uniKey)
 }
 
 func (r *register) register() error {
@@ -244,43 +283,52 @@ func (r *register) register() error {
 	}
 	r.leaseID = rsp.ID
 
-	if _, err := r.client.Put(r.ctx, r.config.ServiceKey, r.curServiceVal, clientV3.WithLease(r.leaseID)); err != nil {
+	if _, err := r.client.Put(r.ctx, r.uniKey, r.curServiceVal, clientV3.WithLease(r.leaseID)); err != nil {
 		return err
 	}
 	return nil
 }
 
 // keepAliveOnce recommend
-func (r *register) keepAliveOnce(ctx context.Context, serviceKey string) error {
+func (r *register) keepAliveOnce(ctx context.Context, key string) error {
 	go func() {
-		ticker := time.NewTicker(r.config.KeepAliveInterval)
+		ticker := time.NewTicker(r.config.KeepAlive.Interval)
 		defer ticker.Stop()
+
+		var revision int64
+		var raftTerm uint64
 
 		for {
 			select {
 			case <-r.closed:
-				dp, err := r.client.Delete(context.Background(), serviceKey)
-				r.handlerMsg(fmt.Sprintf("keepAliveOnce close, delete key:%v, started:%v, err:%v, response: %v",
-					serviceKey, r.startedTime(), err, dp))
+				dp, err := r.client.Delete(context.Background(), key)
+				r.handlerMsg(fmt.Sprintf("[%s] keepAliveOnce Delete name:%s, key:%s, startupTime:%s, uptime:%v, response: %v, err:%v",
+					moduleName, r.config.Name, key, r.startupTime(), r.uptime(), dp, err))
 
 				lrp, err := r.client.Revoke(ctx, r.leaseID)
-				r.handlerMsg(fmt.Sprintf("keepAliveOnce close, revoke leaseID:%v, started:%v, err:%v, response: %v",
-					r.leaseID, r.startedTime(), err, lrp))
+				r.handlerMsg(fmt.Sprintf("[%s] keepAliveOnce Revoke name:%s, key:%s, leaseID:%v, startupTime:%s, uptime:%v, response: %v, err:%v",
+					moduleName, r.config.Name, key, r.leaseID, r.startupTime(), r.uptime(), lrp, err))
 				return
 			case <-ticker.C:
 				leaseKeepAliveResponse, err := r.client.KeepAliveOnce(ctx, r.leaseID)
-				r.handlerMsg(fmt.Sprintf("keepAliveOnce key:%v, leaseID:%v, started:%v, err:%v, response: %v",
-					r.config.ServiceKey, r.leaseID, r.startedTime(), err, leaseKeepAliveResponse))
+				if leaseKeepAliveResponse != nil {
+					revision = leaseKeepAliveResponse.GetRevision()
+					raftTerm = leaseKeepAliveResponse.GetRaftTerm()
+				}
+
+				r.handlerMsg(fmt.Sprintf("[%s] keepAliveOnce name:%s, key:%s, leaseID:%v, startupTime:%s, uptime:%v, mutable:%v, revision:%v, raft_term:%v, err:%v",
+					moduleName, r.config.Name, key, r.leaseID, r.startupTime(), r.uptime(), r.config.MutableVal, revision, raftTerm, err))
 
 				if err == nil {
-					if r.config.MutableVal && r.curServiceVal != r.config.ServiceVal {
-						oldServiceVal := r.curServiceVal
-						r.curServiceVal = r.config.ServiceVal
+					if r.config.MutableVal && r.curServiceVal != r.config.Val {
+						oldServiceVal := r.config.Val
+						r.config.Val = r.curServiceVal // update old val
 						if err = r.register(); err != nil {
-							r.handlerError(fmt.Errorf("keepAliveOnce change serviceVal, from:%v, to:%v, but failed:%w", oldServiceVal, r.curServiceVal, err))
-							r.curServiceVal = oldServiceVal
+							r.handlerError(fmt.Errorf("[%s] keepAliveOnce name:%s, key:%s, change val from:%s, to:%s, but failed:%w",
+								moduleName, r.config.Name, key, oldServiceVal, r.curServiceVal, err))
 						} else {
-							r.handlerMsg(fmt.Sprintf("keepAliveOnce changed serviceVal, from:%v, to:%v", oldServiceVal, r.curServiceVal))
+							r.handlerMsg(fmt.Sprintf("[%s] keepAliveOnce name:%s, key:%s, changed val from:%s, to:%s",
+								moduleName, r.config.Name, key, oldServiceVal, r.curServiceVal))
 						}
 						continue
 					}
@@ -288,10 +336,12 @@ func (r *register) keepAliveOnce(ctx context.Context, serviceKey string) error {
 					// if lease missing, try quick generate new leaseID again
 					if errors.Is(err, rpctypes.ErrLeaseNotFound) {
 						// requested lease not found
-						r.handlerError(fmt.Errorf("keepAliveOnce leaseID:%v, err:%w", r.leaseID, err))
+						r.handlerError(fmt.Errorf("[%s] keepAliveOnce name:%s, key:%s, leaseID:%v, err:%w",
+							moduleName, r.config.Name, key, r.leaseID, err))
 					}
 					if err := r.register(); err == nil {
-						r.handlerError(fmt.Errorf("keepAliveOnce messages count:%d, re register success", len(r.messages)))
+						r.handlerError(fmt.Errorf("[%s] keepAliveOnce name:%s, key:%s, messages count:%d, re register success",
+							moduleName, r.config.Name, key, len(r.messages)))
 					}
 				}
 			}
@@ -301,23 +351,27 @@ func (r *register) keepAliveOnce(ctx context.Context, serviceKey string) error {
 }
 
 // keepAlive start and keepAlive, keep the init val. If you want dynamic update val, replace with keepAliveOnce.
-func (r *register) keepAlive(ctx context.Context, serviceKey string) (err error) {
+func (r *register) keepAlive(ctx context.Context, key string) (err error) {
 	reps, err := r.client.KeepAlive(ctx, r.leaseID)
 	if err != nil {
-		r.handlerError(fmt.Errorf("keepAlive leaseID:%v, err:%w", r.leaseID, err))
+		r.handlerError(fmt.Errorf("[%s] keepAlive name:%s, key:%v, leaseID:%v, err:%w", moduleName, r.config.Name, key, r.leaseID, err))
 		return err
 	}
 
 	go func() {
 		for rsp := range reps {
-			r.handlerMsg(fmt.Sprintf("keepAlive key:%v, leaseID:%v, started:%v, response: %v", serviceKey, r.leaseID, r.startedTime(), rsp))
+			if rsp == nil {
+				continue
+			}
+			r.handlerMsg(fmt.Sprintf("[%s] keepAlive name:%s, key:%s, leaseID:%v, startupTime:%s, uptime:%v, revision:%v, raft_term:%v",
+				moduleName, r.config.Name, key, r.leaseID, r.startupTime(), r.uptime(), rsp.GetRevision(), rsp.GetRaftTerm()))
 		}
 	}()
 
 	go func() {
 		<-r.closed
-		rsp, err := r.client.Delete(context.Background(), serviceKey)
-		r.handlerMsg(fmt.Sprintf("keepAlive close, delete key:%v, err:%v, response:%v", serviceKey, err, rsp))
+		rsp, err := r.client.Delete(context.Background(), key)
+		r.handlerMsg(fmt.Sprintf("[%s] keepAlive close and delete name:%s, key:%s, err:%v, response:%v", moduleName, r.config.Name, key, err, rsp))
 	}()
 	return err
 }

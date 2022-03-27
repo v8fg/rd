@@ -13,6 +13,7 @@ import (
 // Register register interface
 type Register interface {
 	Run() error
+	Update(string) error
 	Errors() <-chan error
 	Messages() <-chan string
 	Close() error
@@ -48,12 +49,22 @@ func (r *RegisterRegistry) Info() string {
 }
 
 // Register the service with some configurations. You can pass the etcd client or only pass the related config items.
-func (r *RegisterRegistry) Register(config *etcd.Config, client *clientV3.Client, etcdConfig clientV3.Config) error {
+// registry key: name or key, the name preferred.
+func (r *RegisterRegistry) Register(config *etcd.Config, client *clientV3.Client, etcdConfig *clientV3.Config) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, ok := r.registers[config.ServiceKey]; ok {
-		return fmt.Errorf("register %v falied, existed", config.ServiceKey)
+	if config == nil || client == nil && etcdConfig == nil {
+		return fmt.Errorf("register falied, config, client or etcdConfig invalid")
+	}
+
+	realKey := config.Name
+	if len(realKey) == 0 {
+		realKey = config.Key
+	}
+
+	if _, ok := r.registers[realKey]; ok {
+		return fmt.Errorf("register registers[%v] falied, existed", realKey)
 	}
 
 	reg, err := etcd.NewRegister(config, client, etcdConfig)
@@ -61,7 +72,7 @@ func (r *RegisterRegistry) Register(config *etcd.Config, client *clientV3.Client
 		return err
 	}
 
-	r.registers[config.ServiceKey] = reg
+	r.registers[realKey] = reg
 	return nil
 }
 
@@ -73,27 +84,27 @@ func (r *RegisterRegistry) Run() (errs []error) {
 	errs = make([]error, 0, len(r.registers))
 	for k, register := range r.registers {
 		if err := register.Run(); err != nil {
-			errs = append(errs, fmt.Errorf("run register key:%v, err:%w", k, err))
+			errs = append(errs, fmt.Errorf("run registers[%v], err:%w", k, err))
 		}
 	}
 	if len(r.registers) == 0 {
-		errs = append(errs, errors.New("no registers here, pls register, then run"))
+		errs = append(errs, errors.New("no registers here, pls register first"))
 	}
 	return errs
 }
 
-// RunService run the register have been registered and with the specified service key or name.
-func (r *RegisterRegistry) RunService(serviceKey string) (errs []error) {
+// RunWithParam run the register have been registered and with the specified name or key.
+func (r *RegisterRegistry) RunWithParam(nameOrKey string) (errs []error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	errs = make([]error, 0, len(r.registers))
-	if register, ok := r.registers[serviceKey]; ok {
+	if register, ok := r.registers[nameOrKey]; ok {
 		if err := register.Run(); err != nil {
-			errs = append(errs, fmt.Errorf("run register key:%v, err:%w", serviceKey, err))
+			errs = append(errs, fmt.Errorf("run registers[%v], err:%w", nameOrKey, err))
 		}
 	} else {
-		errs = append(errs, fmt.Errorf("no register with key:%v, pls register, then run", serviceKey))
+		errs = append(errs, fmt.Errorf("run registers[%v] failed, no register here, pls register first", nameOrKey))
 	}
 	return errs
 }
@@ -106,24 +117,35 @@ func (r *RegisterRegistry) Close() (errs []error) {
 	errs = make([]error, 0, len(r.registers))
 	for k, register := range r.registers {
 		if err := register.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close register key:%v, err:%w", k, err))
+			errs = append(errs, fmt.Errorf("close registers[%v], err:%w", k, err))
 			delete(r.registers, k)
 		}
 	}
 	return errs
 }
 
-// CloseService close all the running registers with the specified service key or name.
-func (r *RegisterRegistry) CloseService(serviceKey string) (errs []error) {
+// CloseWithParam close all the running registers with the specified name or key.
+func (r *RegisterRegistry) CloseWithParam(nameOrKey string) (errs []error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	errs = make([]error, 0, len(r.registers))
-	if register, ok := r.registers[serviceKey]; ok {
+	if register, ok := r.registers[nameOrKey]; ok {
 		if err := register.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close register key:%v, err:%w", serviceKey, err))
-			delete(r.registers, serviceKey)
+			errs = append(errs, fmt.Errorf("close registers[%v], err:%w", nameOrKey, err))
+			delete(r.registers, nameOrKey)
 		}
 	}
 	return errs
+}
+
+// UpdateVal update the specified register's val, shall not call, if no necessary.
+func (r *RegisterRegistry) UpdateVal(nameOrKey, val string) (err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if register, ok := r.registers[nameOrKey]; ok {
+		err = register.Update(val)
+	}
+	return err
 }
