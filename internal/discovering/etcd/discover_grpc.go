@@ -14,15 +14,17 @@ import (
 	"google.golang.org/grpc/resolver"
 )
 
+const moduleName = "discover-etcd-grpc"
+
 type none struct{}
 
 type Config struct {
-	Scheme     string // register resolver with name schema(key)
-	Service    string // Service={serviceKey}/...
-	serviceKey string // ServiceKey={scheme}/{serviceKey}/..., prefix.
+	Name    string // the name for registry store the instance, unique. If empty will use the combine: Scheme, Service replace.
+	Scheme  string // register resolver with name scheme, like: services
+	Service string // service name, like: test/v1.0/grpc
 
-	ChannelBufferSize int  // default 256, for errors or messages channel
-	canCloseClient    bool // If you use input client will true, else false.
+	ChannelBufferSize int // default 256, for errors or messages channel
+
 	// Return specifies what will be populated. If they are set to true,
 	// you must read from them to prevent deadlock.
 	Return struct {
@@ -33,10 +35,10 @@ type Config struct {
 		// the Messages channel (default disabled).
 		Messages bool
 	}
-	ErrorsHandler   func(err <-chan error)       // consume errors, if not set drop.
-	MessagesHandler func(string <-chan string)   // consume messages expect errors, if not set drop.
-	AddressesParser func([]byte) (string, error) // parse address
-	Logger          *log.Logger                  // shall not set, use for debug
+	ErrorsHandler   func(err <-chan error)               // consume errors, if not set drop.
+	MessagesHandler func(string <-chan string)           // consume messages expect errors, if not set drop.
+	AddressesParser func(string, []byte) (string, error) // parse address, k string, val []byte, return address string.
+	Logger          *log.Logger                          // shall not set, use for debug
 }
 
 // discover for etcd
@@ -46,10 +48,13 @@ type discover struct {
 	errors   chan error
 	messages chan string
 
-	ctx       context.Context
-	lock      sync.RWMutex
-	closed    chan none
-	closeOnce sync.Once
+	uniKey string // format like: /{scheme}/{service}/..., prefix.
+
+	ctx            context.Context
+	lock           sync.RWMutex
+	closed         chan none
+	closeOnce      sync.Once
+	canCloseClient bool // If you use input client will true, else false.
 
 	cc resolver.ClientConn
 
@@ -63,24 +68,29 @@ func newDiscover(client *clientV3.Client, config *Config) (*discover, error) {
 		config:   config,
 		errors:   make(chan error, config.ChannelBufferSize),
 		messages: make(chan string, config.ChannelBufferSize),
+		uniKey:   fmt.Sprintf("/%s/%s", config.Scheme, config.Service),
 		ctx:      context.Background(),
 		closed:   make(chan none),
 	}, nil
 }
 
-func NewDiscover(config *Config, client *clientV3.Client, etcdConfig clientV3.Config) (*discover, error) {
+func NewDiscover(config *Config, client *clientV3.Client, etcdConfig *clientV3.Config) (*discover, error) {
 	err := checkConfig(config)
 	if err != nil {
-		return nil, fmt.Errorf("NewDiscover err: %w", err)
+		return nil, fmt.Errorf("[%s] NewDiscover err: %w", moduleName, err)
 	}
+
+	canCloseClient := false
 	if client == nil {
-		client, err = newClient(etcdConfig)
-		if err != nil {
-			return nil, fmt.Errorf("NewRegister create : %w", err)
+		if etcdConfig == nil {
+			return nil, fmt.Errorf("[%s] NewDiscover err: %w", moduleName, errors.New("client and etcdConfig, both nil"))
 		}
-		config.canCloseClient = true
-	} else {
-		config.canCloseClient = false
+
+		client, err = newClient(*etcdConfig)
+		if err != nil {
+			return nil, fmt.Errorf("[%s] NewRegister create : %w", moduleName, err)
+		}
+		canCloseClient = true
 	}
 
 	// watch out &config
@@ -92,19 +102,21 @@ func NewDiscover(config *Config, client *clientV3.Client, etcdConfig clientV3.Co
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
+	r.canCloseClient = canCloseClient
+
 	return r, err
 }
 
 func newClient(config clientV3.Config) (*clientV3.Client, error) {
 	client, err := clientV3.New(config)
 	if err != nil {
-		return nil, fmt.Errorf("create etcd client err: %w", err)
+		return nil, fmt.Errorf("[%s] create etcd client err: %w", moduleName, err)
 	}
 
 	// fetch memberList
 	_, err = client.MemberList(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("fetch memberList err: %w", err)
+		return nil, fmt.Errorf("[%s] fetch memberList err: %w", moduleName, err)
 	}
 
 	return client, err
@@ -112,21 +124,19 @@ func newClient(config clientV3.Config) (*clientV3.Client, error) {
 
 func checkConfig(config *Config) error {
 	if config == nil {
-		return errors.New("checkConfig failed, config nil")
+		return fmt.Errorf("[%s] checkConfig failed, config nil", moduleName)
 	}
+
 	if len(config.Scheme) == 0 {
-		return errors.New("checkConfig failed, Scheme empty")
+		return fmt.Errorf("[%s] checkConfig failed, Scheme empty", moduleName)
 	}
 	if len(config.Service) == 0 {
-		return errors.New("checkConfig failed, Service empty")
+		return fmt.Errorf("[%s] checkConfig failed, Service empty", moduleName)
 	}
 
 	if config.AddressesParser == nil {
-		return errors.New("checkConfig failed, AddressesParser must not nil")
+		return fmt.Errorf("[%s] checkConfig failed, AddressesParser nil", moduleName)
 	}
-
-	// must
-	config.serviceKey = fmt.Sprintf("/%s/%s", config.Scheme, config.Service)
 
 	if config.ChannelBufferSize <= 0 {
 		config.ChannelBufferSize = 256
@@ -145,7 +155,7 @@ func (r *discover) Messages() <-chan string {
 	return r.messages
 }
 
-// Scheme return etcdV3 schema
+// Scheme return etcdV3 scheme
 func (r *discover) Scheme() string {
 	return r.config.Scheme
 }
@@ -153,9 +163,7 @@ func (r *discover) Scheme() string {
 // Build return the resolver.Resolver
 func (r *discover) Build(target resolver.Target, cc resolver.ClientConn, opts resolver.BuildOptions) (resolver.Resolver, error) {
 	r.cc = cc
-	r.handlerMsg(fmt.Sprintf("discover111 Build  key:%v", r.config.serviceKey))
 	go r.watch()
-	r.handlerMsg(fmt.Sprintf("discover122 Build  key:%v", r.config.serviceKey))
 	return r, nil
 }
 
@@ -164,24 +172,25 @@ func (r *discover) Run() error {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
+	r.start = time.Now()
+
 	r.initHandlerAndLogger()
 	resolver.Register(r)
 	return nil
 }
 
 func (r *discover) watch() {
-	r.handlerMsg(fmt.Sprintf("discover123 Build  key:%v", r.config.serviceKey))
-	keyPrefix := r.config.serviceKey
+	keyPrefix := r.uniKey
 	addrDict := make(map[string][]byte)
 	updateAddr := func() {
 		addrList := make([]resolver.Address, 0, len(addrDict))
 		cacheAddresses := make([]string, 0, len(addrDict))
 		for k, v := range addrDict {
 			// parse address
-			endPoint, err := r.config.AddressesParser(v)
+			endPoint, err := r.config.AddressesParser(k, v)
 			if err != nil {
-				r.handlerError(fmt.Errorf("discover watch, key:%v, [k=%v, v=%s], err:%w",
-					keyPrefix, k, v, err))
+				r.handlerError(fmt.Errorf("[%s] AddressesParser name:%s, key:%s, [k=%s, v=%s], err:%w",
+					moduleName, r.config.Name, keyPrefix, k, v, err))
 				continue
 			}
 			addrList = append(addrList, resolver.Address{Addr: endPoint})
@@ -189,14 +198,14 @@ func (r *discover) watch() {
 		}
 		r.cacheAddresses = cacheAddresses
 		err := r.cc.UpdateState(resolver.State{Addresses: addrList})
-		r.handlerMsg(fmt.Sprintf("discover watch UpdateState, key:%v, addresses:%v, err:%v",
-			keyPrefix, cacheAddresses, err))
+		r.handlerMsg(fmt.Sprintf("[%s] UpdateState name:%s, key:%s, addresses:%v, err:%v",
+			moduleName, r.config.Name, keyPrefix, cacheAddresses, err))
 	}
 
 	resp, err := r.client.Get(r.ctx, keyPrefix, clientV3.WithPrefix())
 	if err != nil {
-		r.handlerError(fmt.Errorf("discover watch, key:%v, err:%w",
-			keyPrefix, err))
+		r.handlerError(fmt.Errorf("[%s] Get name:%s, key:%s, err:%w",
+			moduleName, r.config.Name, keyPrefix, err))
 	} else {
 		for i := range resp.Kvs {
 			addrDict[string(resp.Kvs[i].Key)] = resp.Kvs[i].Value
@@ -210,14 +219,15 @@ func (r *discover) watch() {
 			switch ev.Type {
 			case mvccpb.PUT:
 				addrDict[string(ev.Kv.Key)] = ev.Kv.Value
-				r.handlerMsg(fmt.Sprintf("discover watch etcd[PUT], key:%v, value:%v", string(ev.Kv.Key), ev.Kv.Value))
+				r.handlerMsg(fmt.Sprintf("[%s] Watch EventType[PUT], key:%s, value:%s", moduleName,
+					string(ev.Kv.Key), ev.Kv.Value))
 			case mvccpb.DELETE:
 				if ev.PrevKv != nil {
 					delete(addrDict, string(ev.PrevKv.Key))
-					r.handlerMsg(fmt.Sprintf("discover watch etcd[DELETE], key:%v, current addrDict:%+v",
+					r.handlerMsg(fmt.Sprintf("[%s] Watch EventType[DELETE], key:%s, current addrDict:%+v", moduleName,
 						string(ev.PrevKv.Key), addrDict))
 				} else {
-					r.handlerMsg(fmt.Sprintf("discover watch etcd[DELETE], key:%v, current addrDict:%+v",
+					r.handlerMsg(fmt.Sprintf("[%s] Watch EventType[DELETE], key:%s, current addrDict:%+v", moduleName,
 						string(ev.Kv.Key), addrDict))
 				}
 			}
@@ -226,23 +236,24 @@ func (r *discover) watch() {
 	}
 }
 
+// ResolveNow so frequent update, stop log out.
 func (r *discover) ResolveNow(rn resolver.ResolveNowOptions) {
-	r.handlerMsg(fmt.Sprintf("discover with key:%v, has started:%v, ResolveNow",
-		r.config.Service, r.startedTime()))
+	// r.handlerMsg(fmt.Sprintf("[%s] ResolveNow name:%s, key:%s, startupTime:%s, uptime:%v",
+	// 	moduleName, r.config.Name, r.uniKey, r.startupTime(), r.uptime()))
 }
 
 // Close closes the gResolver.
 func (r *discover) Close() {
-	r.handlerMsg(fmt.Sprintf("discover with key:%v, has started:%v, will shutdown",
-		r.config.Service, r.startedTime()))
+	r.handlerMsg(fmt.Sprintf("[%s] Close name:%s, key:%s, startupTime:%s, uptime:%v, will shutdown",
+		moduleName, r.config.Name, r.uniKey, r.startupTime(), r.uptime()))
 
 	var err error
 
 	r.closeOnce.Do(func() {
-		if r.config.canCloseClient && r.client != nil {
+		if r.canCloseClient && r.client != nil {
 			err = r.client.Close()
-			r.handlerError(fmt.Errorf("discover with key:%v, close client error:%v",
-				r.config.Service, err))
+			r.handlerError(fmt.Errorf("[%s] Close name:%s, key:%s, error:%v",
+				moduleName, r.config.Name, r.uniKey, err))
 		}
 
 		close(r.closed)
@@ -263,8 +274,14 @@ func (r *discover) Close() {
 	}
 }
 
-func (r *discover) startedTime() time.Duration {
+// uptime already run time
+func (r *discover) uptime() time.Duration {
 	return time.Now().Sub(r.start)
+}
+
+// startupTime the time Run at
+func (r *discover) startupTime() string {
+	return r.start.Format("2006-01-02T15:04:05.000+0800")
 }
 
 func (r *discover) initHandlerAndLogger() {

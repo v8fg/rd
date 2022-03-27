@@ -20,7 +20,7 @@ type Discover interface {
 	Close()
 }
 
-// DiscoverRegistry can choose an appropriate Discover based on the provided, with service prefix key.
+// DiscoverRegistry can choose an appropriate Discover based on the provided, with name or service prefix key.
 type DiscoverRegistry struct {
 	discovers map[string]Discover
 
@@ -34,6 +34,10 @@ func NewDiscoverRegistry() *DiscoverRegistry {
 	}
 }
 
+func generateStandardKey(scheme, service string) string {
+	return fmt.Sprintf("/%s/%s", scheme, service)
+}
+
 // Info return the basic info, service key.
 func (r *DiscoverRegistry) Info() string {
 	r.mu.RLock()
@@ -42,29 +46,42 @@ func (r *DiscoverRegistry) Info() string {
 	if r != nil {
 		regK := make([]string, 0, len(r.discovers))
 		for k, v := range r.discovers {
-			regK = append(regK, fmt.Sprintf("name:%v, addr:%p", k, v))
+			regK = append(regK, fmt.Sprintf("key:%v, addr:%p", k, v))
 		}
 		return fmt.Sprintf("%v", regK)
 	}
 	return ""
 }
 
-func (r *DiscoverRegistry) Resolver(serviceKey string) resolver.Builder {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if discover, ok := r.discovers[serviceKey]; ok {
-		return discover
-	}
-	return nil
-}
+// func (r *DiscoverRegistry) Resolver(scheme, service string) resolver.Builder {
+// 	r.mu.RLock()
+// 	defer r.mu.RUnlock()
+//
+// 	key := generateStandardKey(scheme, service)
+// 	if discover, ok := r.discovers[key]; ok {
+// 		return discover
+// 	}
+// 	return nil
+// }
 
 // Register the Discover for the service.
-func (r *DiscoverRegistry) Register(config *etcd.Config, client *clientV3.Client, etcdConfig clientV3.Config) error {
+func (r *DiscoverRegistry) Register(config *etcd.Config, client *clientV3.Client, etcdConfig *clientV3.Config) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, ok := r.discovers[config.Service]; ok {
-		return fmt.Errorf("discover %v falied, existed", config.Service)
+	if config == nil || client == nil && etcdConfig == nil {
+		return fmt.Errorf("register discover falied, config, client or etcdConfig invalid")
+	}
+
+	k := generateStandardKey(config.Scheme, config.Service)
+
+	realKey := config.Name
+	if len(realKey) == 0 {
+		realKey = k
+	}
+
+	if _, ok := r.discovers[realKey]; ok {
+		return fmt.Errorf("register discovers[%v] falied, existed", realKey)
 	}
 
 	dis, err := etcd.NewDiscover(config, client, etcdConfig)
@@ -72,7 +89,7 @@ func (r *DiscoverRegistry) Register(config *etcd.Config, client *clientV3.Client
 		return err
 	}
 
-	r.discovers[config.Service] = dis
+	r.discovers[realKey] = dis
 	return nil
 }
 
@@ -83,28 +100,33 @@ func (r *DiscoverRegistry) Run() (errs []error) {
 
 	errs = make([]error, 0, len(r.discovers))
 	for k, discover := range r.discovers {
-		// resolver.Register(discover)
 		if err := discover.Run(); err != nil {
-			errs = append(errs, fmt.Errorf("discover key:%v, err:%w", k, err))
+			errs = append(errs, fmt.Errorf("run discovers[%v], err:%w", k, err))
 		}
 	}
 	if len(r.discovers) == 0 {
-		errs = append(errs, errors.New("no discovers here, pls register, then run"))
+		errs = append(errs, errors.New("run discovers here, pls register first"))
 	}
 	return
 }
 
-// RunService run discover has been registered and with the specified service key or name.
-func (r *DiscoverRegistry) RunService(serviceKey string) (errs []error) {
+// RunWithParam run discover has been registered and with the specified name or the combine: scheme and service.
+func (r *DiscoverRegistry) RunWithParam(name, scheme, service string) (errs []error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if discover, ok := r.discovers[serviceKey]; ok {
+	k := generateStandardKey(scheme, service)
+	realKey := name
+	if len(realKey) == 0 {
+		realKey = k
+	}
+
+	if discover, ok := r.discovers[realKey]; ok {
 		if err := discover.Run(); err != nil {
-			errs = append(errs, fmt.Errorf("discover key:%v, err:%w", serviceKey, err))
+			errs = append(errs, fmt.Errorf("run discovers[%v], err:%w", realKey, err))
 		}
 	} else {
-		errs = append(errs, fmt.Errorf("no discover with key:%v, pls register, then run", serviceKey))
+		errs = append(errs, fmt.Errorf("run discovers[%v] failed, no discover here, pls register first", realKey))
 	}
 	return
 }
@@ -120,14 +142,18 @@ func (r *DiscoverRegistry) Close() {
 	}
 }
 
-// CloseService close all the running discovers with the specified service key or name.
-func (r *DiscoverRegistry) CloseService(serviceKey string) (errs []error) {
+// CloseWithParam close all the running discovers with the specified name or the combine: scheme and service.
+func (r *DiscoverRegistry) CloseWithParam(name, scheme, service string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if discover, ok := r.discovers[serviceKey]; ok {
-		discover.Close()
-		delete(r.discovers, serviceKey)
+	k := generateStandardKey(scheme, service)
+	realKey := name
+	if len(realKey) == 0 {
+		realKey = k
 	}
-	return errs
+	if discover, ok := r.discovers[realKey]; ok {
+		discover.Close()
+		delete(r.discovers, realKey)
+	}
 }

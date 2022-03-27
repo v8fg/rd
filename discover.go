@@ -2,10 +2,8 @@ package rd
 
 import (
 	clientV3 "go.etcd.io/etcd/client/v3"
-	"google.golang.org/grpc/resolver"
 
 	"github.com/v8fg/rd/internal/discovering"
-	"github.com/v8fg/rd/internal/discovering/etcd"
 )
 
 var (
@@ -16,27 +14,30 @@ func init() {
 }
 
 // DiscoverEtcd etcd discover with some configurations.
-func DiscoverEtcd(config *etcd.Config, client *clientV3.Client, etcdConfig clientV3.Config) error {
-	return discoverRegistry.Register(config, client, etcdConfig)
+// registry key: name or key, the name preferred.
+func DiscoverEtcd(config *DiscoverConfig, client *clientV3.Client, etcdConfig *clientV3.Config) error {
+	_cfg := convertDiscoverConfigToInternalETCDDiscoverConfig(config)
+	return discoverRegistry.Register(_cfg, client, etcdConfig)
 }
 
-// DiscoverInfo return the basic info about discover: service key and discover addr.
+// DiscoverInfo return the basic info about discover: key and discover addr.
 func DiscoverInfo() string {
 	return discoverRegistry.Info()
 }
 
-func Resolver(serviceKey string) resolver.Builder {
-	return discoverRegistry.Resolver(serviceKey)
-}
+// Resolver shall call auto by the run
+// func Resolver(scheme, service string) resolver.Builder {
+// 	return discoverRegistry.Resolver(scheme, service)
+// }
 
 // DiscoverRun the registers have been registered.
 func DiscoverRun() []error {
 	return discoverRegistry.Run()
 }
 
-// DiscoverRunService run discover have been registered and with the specified service key or name.
-func DiscoverRunService(service string) []error {
-	return discoverRegistry.RunService(service)
+// DiscoverRunWithParam run discover have been registered with the specified name or the combine: scheme and service.
+func DiscoverRunWithParam(name, scheme, service string) []error {
+	return discoverRegistry.RunWithParam(name, scheme, service)
 }
 
 // DiscoverClose close all the running discovers.
@@ -44,7 +45,7 @@ func DiscoverClose() {
 	discoverRegistry.Close()
 }
 
-// DiscoverCloseService close all the running discovers with the specified service key or name.
-func DiscoverCloseService(service string) {
-	discoverRegistry.CloseService(service)
+// DiscoverCloseWithParam close all the running discovers with the specified name or the combine: scheme and service.
+func DiscoverCloseWithParam(name, scheme, service string) {
+	discoverRegistry.CloseWithParam(name, scheme, service)
 }

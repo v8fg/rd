@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -10,74 +11,81 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/v8fg/rd"
-	"github.com/v8fg/rd/internal/discovering/etcd"
 )
 
 var (
-	scheme  = "services"
-	service = "test/v1.0"
-	// builder resolver.Builder
-)
-
-func init() {
-	initDiscoverGRPCETCD()
-
-	// rd.DiscoverRun()
-
-}
-func main() {
-
-	newWithDefaultServiceConfig := grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy":"round_robin"}`)
-	_, err := grpc.DialContext(context.TODO(), scheme+"://authority/"+service, newWithDefaultServiceConfig, grpc.WithBlock(), grpc.WithInsecure())
-	if err != nil {
-		panic(err)
-	}
-	runDiscover()
-}
-
-func initDiscoverGRPCETCD() {
-	var err error
-
-	errorsHandler := func(errors <-chan error) {
+	errorsHandler = func(errors <-chan error) {
 		for errMsg := range errors {
 			fmt.Printf("errors consume, count:%v, content:%v\n", len(errors), errMsg)
 		}
 	}
 
-	messagesHandler := func(messages <-chan string) {
+	messagesHandler = func(messages <-chan string) {
 		for message := range messages {
 			fmt.Printf("messages consume, count:%v, content:%v\n", len(messages), message)
 		}
 	}
 
-	addressesParser := func(data []byte) (string, error) {
-		fmt.Printf("addressesParser consume, content:%s\n", data)
-		return string(data), nil
+	addressesParser = func(key string, data []byte) (addr string, err error) {
+		fmt.Printf("addressesParser consume, key:%v, data: %s\n", key, data)
+		return string(data), err
 	}
 
-	// logger := log.New(log.Writer(), "[rd-test] ", log.LstdFlags|log.Llongfile)
-	logger := log.New(log.Writer(), "[rd-test-discover] ", log.LstdFlags|log.Lshortfile)
-	cfg := etcd.Config{
-		Scheme:            "services",
-		Service:           "test/v1.0",
-		ChannelBufferSize: 16,
-		ErrorsHandler:     errorsHandler,
-		MessagesHandler:   messagesHandler,
-		Logger:            logger,
-		AddressesParser:   addressesParser,
+	addressesParserJSON = func(key string, data []byte) (addr string, err error) {
+		fmt.Printf("addressesParser consume, key:%v, data:%s\n", key, data)
+		dict := make(map[string]interface{})
+		err = json.Unmarshal(data, &dict)
+		fmt.Printf("dict:%v, endPoint: %s\n", dict, dict["endPoint"].(string))
+		return addr, err
 	}
-	// cfg.Return.Errors = true
-	// cfg.Return.Messages = true
 
-	err = rd.DiscoverEtcd(&cfg, nil, clientV3.Config{
+	// logger = log.New(log.Writer(), "[rd-test-discover] ", log.LstdFlags|log.Lshortfile)
+	logger = log.New(log.Writer(), "[rd-test-discover] ", log.LstdFlags)
+
+	// 	your register key will be: /{scheme}/{service}
+	scheme               = "services"
+	service              = "test/v1.0"
+	discoverRegistryName = "my-rd-test-discover" + time.Now().Format("200601021504")
+)
+
+func init() {
+	initDiscoverGRPCETCD()
+
+}
+
+func main() {
+	runDiscover()
+	newWithDefaultServiceConfig := grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy":"round_robin"}`)
+	// _, err := grpc.DialContext(context.TODO(), scheme+"://authority/"+service, newWithDefaultServiceConfig, grpc.WithBlock(), grpc.WithInsecure())
+	_, err := grpc.DialContext(context.TODO(), scheme+"://authority/"+service, newWithDefaultServiceConfig, grpc.WithInsecure())
+	if err != nil {
+		panic(err)
+	}
+
+	block()
+}
+
+func initDiscoverGRPCETCD() {
+	var err error
+	cfg := rd.DiscoverConfig{
+		Name:    discoverRegistryName,
+		Scheme:  scheme,
+		Service: service,
+		CommonConfig: rd.CommonConfig{
+			ChannelBufferSize: 16,
+			ErrorsHandler:     errorsHandler,
+			MessagesHandler:   messagesHandler,
+			Logger:            logger,
+		},
+		AddressesParser: addressesParser,
+	}
+	cfg.Return.Errors = true
+	cfg.Return.Messages = true
+
+	err = rd.DiscoverEtcd(&cfg, nil, &clientV3.Config{
 		Endpoints:   []string{"127.0.0.1:2379"},
 		DialTimeout: time.Second * 5,
 	})
-
-	errs := rd.DiscoverRun()
-	if len(errs) > 0 {
-		fmt.Printf("DiscoverRun errors:%v\n", errs)
-	}
 	fmt.Printf("DiscoverEtcd: %+v, err:%v\n", rd.DiscoverInfo(), err)
 	if err != nil {
 		panic(err)
@@ -85,14 +93,22 @@ func initDiscoverGRPCETCD() {
 }
 
 func runDiscover() {
+	errs := rd.DiscoverRun()
+	if len(errs) > 0 {
+		fmt.Printf("DiscoverRun errors:%v\n", errs)
+	}
+}
 
-	tk := time.NewTicker(time.Second * 3)
+func block() {
+	log.Printf("[block] block main exit\n")
+
+	tk := time.NewTicker(time.Second * 5)
 	defer tk.Stop()
 
 	done := make(chan struct{})
 
 	go func() {
-		<-time.After(time.Second * 90)
+		<-time.After(time.Second * 900)
 		done <- struct{}{}
 	}()
 
@@ -107,5 +123,5 @@ loop:
 		}
 		log.Println("out select, but in for loop")
 	}
-	log.Println("all is done")
+	log.Println("[block] all is done")
 }

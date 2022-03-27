@@ -1,10 +1,11 @@
 package rd
 
 import (
+	"log"
+
 	clientV3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/v8fg/rd/internal/registering"
-	"github.com/v8fg/rd/internal/registering/etcd"
 )
 
 var (
@@ -15,11 +16,13 @@ func init() {
 }
 
 // RegisterEtcd etcd register with some configurations.
-func RegisterEtcd(config *etcd.Config, client *clientV3.Client, etcdConfig clientV3.Config) error {
-	return registerRegistry.Register(config, client, etcdConfig)
+// registry key: name or key, the name preferred.
+func RegisterEtcd(config *RegisterConfig, client *clientV3.Client, etcdConfig *clientV3.Config) error {
+	_cfg := convertRegisterConfigToInternalETCDRegisterConfig(config)
+	return registerRegistry.Register(_cfg, client, etcdConfig)
 }
 
-// RegisterInfo return the basic info about register: service key and register addr.
+// RegisterInfo return the basic info about register: key and register addr.
 func RegisterInfo() string {
 	return registerRegistry.Info()
 }
@@ -29,9 +32,9 @@ func RegisterRun() []error {
 	return registerRegistry.Run()
 }
 
-// RegisterRunService run the register have been registered and with the specified service key or name.
-func RegisterRunService(service string) []error {
-	return registerRegistry.RunService(service)
+// RegisterRunWithParam run the register have been registered and with the specified name or key.
+func RegisterRunWithParam(nameOrKey string) []error {
+	return registerRegistry.RunWithParam(nameOrKey)
 }
 
 // RegisterClose close all the running registers.
@@ -39,7 +42,14 @@ func RegisterClose() []error {
 	return registerRegistry.Close()
 }
 
-// RegisterCloseService close all the running registers with the specified service key or name.
-func RegisterCloseService(service string) []error {
-	return registerRegistry.CloseService(service)
+// RegisterCloseWithParam close all the running registers with the specified key or name.
+func RegisterCloseWithParam(nameOrKey string) []error {
+	return registerRegistry.CloseWithParam(nameOrKey)
+}
+
+// RegisterUpdateVal update the register val, shall not call, if no necessary.
+// If you want call success, must set MutableVal=true when init the register.
+func RegisterUpdateVal(nameOrKey, val string) error {
+	log.Printf("RegisterUpdateVal nameOrKey:%v, val:%v", nameOrKey, val)
+	return registerRegistry.UpdateVal(nameOrKey, val)
 }
