@@ -11,6 +11,7 @@ import (
 
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientV3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/atomic"
 )
 
 const moduleName = "register-etcd"
@@ -25,12 +26,13 @@ type Config struct {
 	Val  string
 	TTL  time.Duration
 
-	ChannelBufferSize int  // default 256, for errors or messages channel
-	MutableVal        bool // If true you can override the 'Val', default false. Pls watch out other items shall not change, so dangerous.
+	MaxLoopTry        uint64 // default 64, if error and try max times, register effect only KeepAlive.Mode=1.
+	ChannelBufferSize int    // default 256, for errors or messages channel
+	MutableVal        bool   // If true you can override the 'Val', default false. Pls watch out other items shall not change, so dangerous.
 
 	KeepAlive struct {
 		Interval time.Duration // default 1s, at least >=100ms, better < TTL, invalid will set TTL-1
-		Mode     uint8         // 0=ticker(default, KeepAliveOnce), 1=KeepAlive
+		Mode     uint8         // 0=ticker(default, KeepAliveOnce), 1=KeepAlive(not support val update)
 	}
 
 	// Return specifies what will be populated. If they are set to true,
@@ -66,18 +68,27 @@ type register struct {
 	curServiceVal string           // used for updating the old val, if set MutableVal=true
 	leaseID       clientV3.LeaseID // auto generate, lease
 	start         time.Time        // used to calculate the time to the present
+
+	curLoopTry             atomic.Uint64
+	maxLoopTry             uint64    // default 64
+	latestLoopTryTime      time.Time // now - latestLoopTryTime > deltaResetTimeDuration, reset curLoopTry=0
+	deltaResetTimeDuration time.Duration
+
+	etcdConfig *clientV3.Config // can use reconnect, if you use config create the etcd client.
 }
 
 func newRegister(client *clientV3.Client, config *Config) (*register, error) {
 	return &register{
-		client:        client,
-		config:        config,
-		errors:        make(chan error, config.ChannelBufferSize),
-		messages:      make(chan string, config.ChannelBufferSize),
-		uniKey:        config.Key, // copy to avoid update this.
-		ctx:           context.Background(),
-		closed:        make(chan none),
-		curServiceVal: config.Val,
+		client:                 client,
+		config:                 config,
+		errors:                 make(chan error, config.ChannelBufferSize),
+		messages:               make(chan string, config.ChannelBufferSize),
+		uniKey:                 config.Key, // copy to avoid update this.
+		ctx:                    context.Background(),
+		closed:                 make(chan none),
+		curServiceVal:          config.Val,
+		maxLoopTry:             config.MaxLoopTry,
+		deltaResetTimeDuration: time.Minute * 1,
 	}, nil
 }
 
@@ -113,8 +124,20 @@ func NewRegister(config *Config, client *clientV3.Client, etcdConfig *clientV3.C
 	defer r.lock.Unlock()
 
 	r.canCloseClient = canCloseClient
+	r.etcdConfig = etcdConfig
 
 	return r, err
+}
+
+func (r *register) reConnectEtcd() error {
+	var err error
+	if r.etcdConfig != nil {
+		r.client, err = newClient(*r.etcdConfig)
+		if err != nil {
+			return fmt.Errorf("[%s] reConnectEtcd create : %w", moduleName, err)
+		}
+	}
+	return nil
 }
 
 func newClient(config clientV3.Config) (*clientV3.Client, error) {
@@ -158,6 +181,9 @@ func checkConfig(config *Config) error {
 	}
 	if config.ChannelBufferSize <= 0 {
 		config.ChannelBufferSize = 256
+	}
+	if config.MaxLoopTry <= 0 {
+		config.ChannelBufferSize = 64
 	}
 	return nil
 
@@ -352,13 +378,12 @@ func (r *register) keepAliveOnce(ctx context.Context, key string) error {
 
 // keepAlive start and keepAlive, keep the init val. If you want dynamic update val, replace with keepAliveOnce.
 func (r *register) keepAlive(ctx context.Context, key string) (err error) {
-	reps, err := r.client.KeepAlive(ctx, r.leaseID)
-	if err != nil {
-		r.handlerError(fmt.Errorf("[%s] keepAlive name:%s, key:%v, leaseID:%v, err:%w", moduleName, r.config.Name, key, r.leaseID, err))
-		return err
-	}
-
-	go func() {
+	aliveDeal := func() error {
+		reps, err := r.client.KeepAlive(ctx, r.leaseID)
+		if err != nil {
+			r.handlerError(fmt.Errorf("[%s] keepAlive name:%s, key:%v, leaseID:%v, err:%w", moduleName, r.config.Name, key, r.leaseID, err))
+			return err
+		}
 		for rsp := range reps {
 			if rsp == nil {
 				continue
@@ -366,13 +391,54 @@ func (r *register) keepAlive(ctx context.Context, key string) (err error) {
 			r.handlerMsg(fmt.Sprintf("[%s] keepAlive name:%s, key:%s, leaseID:%v, startupTime:%s, uptime:%v, revision:%v, raft_term:%v",
 				moduleName, r.config.Name, key, r.leaseID, r.startupTime(), r.uptime(), rsp.GetRevision(), rsp.GetRaftTerm()))
 		}
-	}()
+		return nil
+	}
 
-	go func() {
-		<-r.closed
-		rsp, err := r.client.Delete(context.Background(), key)
-		r.handlerMsg(fmt.Sprintf("[%s] keepAlive close and delete name:%s, key:%s, err:%v, response:%v", moduleName, r.config.Name, key, err, rsp))
-	}()
+	// only first KeepAlive error will return
+	if err = aliveDeal(); err != nil {
+		return err
+	}
+
+loop:
+	for {
+		r.latestLoopTryTime = time.Now()
+		r.curLoopTry.Add(1)
+		loopCount := r.curLoopTry.Load()
+		if loopCount > r.maxLoopTry {
+			r.handlerError(fmt.Errorf("[%s] keepAlive name:%s, key:%v, leaseID:%v, break and exited, over max loopCount:%v",
+				moduleName, r.config.Name, key, r.leaseID, r.maxLoopTry))
+			break loop
+		}
+
+		r.handlerMsg(fmt.Sprintf("[%s] keepAlive enter loop:%v, maxLoopTry:%v, name:%s, key:%s, err:%v", moduleName, loopCount, r.maxLoopTry, r.config.Name, key, err))
+
+		err = aliveDeal()
+		if err != nil {
+			r.handlerError(fmt.Errorf("[%s] keepAlive name:%s, key:%v, leaseID:%v, err:%w", moduleName, r.config.Name, key, r.leaseID, err))
+		}
+
+		select {
+		case <-r.closed:
+			rsp, err := r.client.Delete(context.Background(), key)
+			r.handlerMsg(fmt.Sprintf("[%s] keepAlive close and delete name:%s, key:%s, err:%v, response:%v", moduleName, r.config.Name, key, err, rsp))
+			break loop
+		default:
+		}
+		// reset after long time, no loop try
+		latestNoLoopDeltaTime := time.Now().Sub(r.latestLoopTryTime)
+		if latestNoLoopDeltaTime > r.deltaResetTimeDuration {
+			r.curLoopTry.Store(0)
+			r.handlerMsg(fmt.Sprintf("[%s] keepAlive reset curLoopTry name:%s, key:%s, latestNoLoopDeltaTime:%v more than r.deltaResetTimeDuration:%v",
+				moduleName, r.config.Name, key, latestNoLoopDeltaTime, r.deltaResetTimeDuration))
+		}
+
+		if r.client == nil {
+			err = r.reConnectEtcd()
+			r.handlerMsg(fmt.Sprintf("[%s] keepAlive reConnectEtcd curLoopTry:%v, name:%s, key:%s, err:%v", moduleName, r.curLoopTry, r.config.Name, key, err))
+		}
+
+	}
+	r.handlerMsg(fmt.Sprintf("[%s] keepAlive break loop and exit name:%s, key:%s, err:%v", moduleName, r.config.Name, key, err))
 	return err
 }
 

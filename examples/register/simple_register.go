@@ -24,12 +24,13 @@ var (
 	}
 	// logger = log.New(log.Writer(), "[rd-test-register] ", log.LstdFlags|log.Lshortfile)
 	logger = log.New(log.Writer(), "[rd-test-register] ", log.LstdFlags)
+	key    = fmt.Sprintf("/services/test/v1.0/grpc/127.0.0.1:33%v", time.Now().Second()+int(rand.Int31n(300)))
 )
 
 var cfg = rd.RegisterConfig{
 	Name: "my-rd-test-register" + time.Now().Format("200601021504"),
-	Key:  fmt.Sprintf("/services/test/v1.0/grpc/127.0.0.1:33%v", time.Now().Second()+int(rand.Int31n(300))),
-	Val:  "first" + time.Now().Format("20060102150405"),
+	Key:  key,
+	Val:  key,
 	TTL:  time.Second * 15,
 	CommonConfig: rd.CommonConfig{
 		ChannelBufferSize: 64,
@@ -37,6 +38,7 @@ var cfg = rd.RegisterConfig{
 		MessagesHandler:   messagesHandler,
 		Logger:            logger,
 	},
+	MaxLoopTry: 16,
 	MutableVal: true,
 	// KeepAliveMode:     1,
 }
@@ -50,7 +52,7 @@ func initRegisterETCD() {
 	// cfg.Return.Errors = true
 	// cfg.Return.Messages = true
 	cfg.KeepAlive.Interval = time.Second * 8
-	// cfg.KeepAlive.Mode = 0
+	cfg.KeepAlive.Mode = 1
 	// cfg.Logger = logger
 
 	err := rd.RegisterEtcd(&cfg, nil, &clientV3.Config{

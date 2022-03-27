@@ -37,16 +37,18 @@ type RegisterConfig struct {
 
 	KeepAlive struct {
 		Interval time.Duration // default 1s, at least >=100ms, better < TTL, invalid will set TTL-1
-		Mode     uint8         // 0=ticker(default, KeepAliveOnce), 1=KeepAlive
+		Mode     uint8         // 0=ticker(default, KeepAliveOnce), 1=KeepAlive(not support val update)
 	}
 
+	MaxLoopTry uint64 // default 64, if error and try max times, register effect only KeepAlive.Mode=1.
 	CommonConfig
 }
 
 type DiscoverConfig struct {
-	Name    string // the name for store the instance, unique. If empty will use Scheme, Service replace.
-	Scheme  string // register resolver with name scheme, like: services
-	Service string // service name, like: test/v1.0/grpc
+	Name          string // the name for store the instance, unique. If empty will use Scheme, Service replace.
+	Scheme        string // register resolver with name scheme, like: services
+	Service       string // service name, like: test/v1.0/grpc
+	ReturnResolve bool   // if true, will output Resolve info to messages.
 
 	AddressesParser func(string, []byte) (string, error) // parse address, k string, val []byte, return address string.
 
@@ -60,6 +62,7 @@ func convertRegisterConfigToInternalETCDRegisterConfig(rgc *RegisterConfig) (rge
 			Key:               rgc.Key,
 			Val:               rgc.Val,
 			TTL:               rgc.TTL,
+			MaxLoopTry:        rgc.MaxLoopTry,
 			ChannelBufferSize: rgc.ChannelBufferSize,
 			MutableVal:        rgc.MutableVal,
 			KeepAlive:         rgc.KeepAlive,
@@ -79,6 +82,7 @@ func convertDiscoverConfigToInternalETCDDiscoverConfig(dc *DiscoverConfig) (dce 
 			Name:              dc.Name,
 			Scheme:            dc.Scheme,
 			Service:           dc.Service,
+			ReturnResolve:     dc.ReturnResolve,
 			ChannelBufferSize: dc.ChannelBufferSize,
 			Return:            dc.Return,
 			ErrorsHandler:     dc.ErrorsHandler,
