@@ -78,6 +78,7 @@ func initDiscoverGRPCETCD() {
 			Logger:            logger,
 		},
 		AddressesParser: addressesParser,
+		ReturnResolve:   true,
 	}
 	cfg.Return.Errors = true
 	cfg.Return.Messages = true

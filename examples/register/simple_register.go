@@ -37,6 +37,7 @@ var cfg = rd.RegisterConfig{
 		MessagesHandler:   messagesHandler,
 		Logger:            logger,
 	},
+	MaxLoopTry: 16,
 	MutableVal: true,
 	// KeepAliveMode:     1,
 }
@@ -50,7 +51,7 @@ func initRegisterETCD() {
 	// cfg.Return.Errors = true
 	// cfg.Return.Messages = true
 	cfg.KeepAlive.Interval = time.Second * 8
-	// cfg.KeepAlive.Mode = 0
+	cfg.KeepAlive.Mode = 1
 	// cfg.Logger = logger
 
 	err := rd.RegisterEtcd(&cfg, nil, &clientV3.Config{

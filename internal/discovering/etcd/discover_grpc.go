@@ -23,7 +23,8 @@ type Config struct {
 	Scheme  string // register resolver with name scheme, like: services
 	Service string // service name, like: test/v1.0/grpc
 
-	ChannelBufferSize int // default 256, for errors or messages channel
+	ReturnResolve     bool // if true, will output Resolve info to messages.
+	ChannelBufferSize int  // default 256, for errors or messages channel
 
 	// Return specifies what will be populated. If they are set to true,
 	// you must read from them to prevent deadlock.
@@ -141,8 +142,8 @@ func checkConfig(config *Config) error {
 	if config.ChannelBufferSize <= 0 {
 		config.ChannelBufferSize = 256
 	}
-	return nil
 
+	return nil
 }
 
 // Errors implements Discover and return errors.
@@ -238,8 +239,13 @@ func (r *discover) watch() {
 
 // ResolveNow so frequent update, stop log out.
 func (r *discover) ResolveNow(rn resolver.ResolveNowOptions) {
-	// r.handlerMsg(fmt.Sprintf("[%s] ResolveNow name:%s, key:%s, startupTime:%s, uptime:%v",
-	// 	moduleName, r.config.Name, r.uniKey, r.startupTime(), r.uptime()))
+	r.lock.RLock()
+	defer r.lock.RUnlock()
+
+	if r.config.ReturnResolve {
+		r.handlerMsg(fmt.Sprintf("[%s] ResolveNow name:%s, key:%s, startupTime:%s, uptime:%v",
+			moduleName, r.config.Name, r.uniKey, r.startupTime(), r.uptime()))
+	}
 }
 
 // Close closes the gResolver.
