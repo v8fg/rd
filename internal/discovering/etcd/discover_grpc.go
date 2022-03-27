@@ -225,9 +225,11 @@ func (r *discover) watch() {
 			case mvccpb.DELETE:
 				if ev.PrevKv != nil {
 					delete(addrDict, string(ev.PrevKv.Key))
-					r.handlerMsg(fmt.Sprintf("[%s] Watch EventType[DELETE], key:%s, current addrDict:%+v", moduleName,
+					r.handlerMsg(fmt.Sprintf("[%s] Watch EventType[DELETE], PrevKv key:%s, current addrDict:%+v", moduleName,
 						string(ev.PrevKv.Key), addrDict))
 				} else {
+					// expired del
+					delete(addrDict, string(ev.Kv.Key))
 					r.handlerMsg(fmt.Sprintf("[%s] Watch EventType[DELETE], key:%s, current addrDict:%+v", moduleName,
 						string(ev.Kv.Key), addrDict))
 				}
@@ -239,12 +241,9 @@ func (r *discover) watch() {
 
 // ResolveNow so frequent update, stop log out.
 func (r *discover) ResolveNow(rn resolver.ResolveNowOptions) {
-	r.lock.RLock()
-	defer r.lock.RUnlock()
-
 	if r.config.ReturnResolve {
-		r.handlerMsg(fmt.Sprintf("[%s] ResolveNow name:%s, key:%s, startupTime:%s, uptime:%v",
-			moduleName, r.config.Name, r.uniKey, r.startupTime(), r.uptime()))
+		r.handlerMsg(fmt.Sprintf("[%s] ResolveNow name:%s, key:%s, startupTime:%s, uptime:%v, cacheAddresses:%v",
+			moduleName, r.config.Name, r.uniKey, r.startupTime(), r.uptime(), r.cacheAddresses))
 	}
 }
 
