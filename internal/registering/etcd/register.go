@@ -218,7 +218,7 @@ func (r *register) Run() error {
 
 	err := r.register()
 	if err != nil {
-		panic(fmt.Errorf("[%s] register name:%s, key:%s, err: %w", moduleName, r.config.Name, r.uniKey, err))
+		return fmt.Errorf("[%s] register name:%s, key:%s, err: %w", moduleName, r.config.Name, r.uniKey, err)
 	}
 
 	r.start = time.Now()
@@ -376,69 +376,77 @@ func (r *register) keepAliveOnce(ctx context.Context, key string) error {
 	return nil
 }
 
-// keepAlive start and keepAlive, keep the init val. If you want dynamic update val, replace with keepAliveOnce.
 func (r *register) keepAlive(ctx context.Context, key string) (err error) {
-	aliveDeal := func() error {
-		reps, err := r.client.KeepAlive(ctx, r.leaseID)
-		if err != nil {
-			r.handlerError(fmt.Errorf("[%s] keepAlive name:%s, key:%v, leaseID:%v, err:%w", moduleName, r.config.Name, key, r.leaseID, err))
-			return err
-		}
-		for rsp := range reps {
-			if rsp == nil {
-				continue
+	return r.keepAliveLoop(ctx, key)
+}
+
+// keepAlive start and keepAlive, keep the init val. If you want dynamic update val, replace with keepAliveOnce.
+func (r *register) keepAliveLoop(ctx context.Context, key string) (err error) {
+	go func() {
+		aliveDeal := func() error {
+			reps, err := r.client.KeepAlive(ctx, r.leaseID)
+			if err != nil {
+				r.handlerError(fmt.Errorf("[%s] keepAlive name:%s, key:%v, leaseID:%v, err:%w", moduleName, r.config.Name, key, r.leaseID, err))
+				return err
 			}
-			r.handlerMsg(fmt.Sprintf("[%s] keepAlive name:%s, key:%s, leaseID:%v, startupTime:%s, uptime:%v, revision:%v, raft_term:%v",
-				moduleName, r.config.Name, key, r.leaseID, r.startupTime(), r.uptime(), rsp.GetRevision(), rsp.GetRaftTerm()))
-		}
-		return nil
-	}
-
-	// only first KeepAlive error will return
-	if err = aliveDeal(); err != nil {
-		return err
-	}
-
-loop:
-	for {
-		r.latestLoopTryTime = time.Now()
-		r.curLoopTry.Add(1)
-		loopCount := r.curLoopTry.Load()
-		if loopCount > r.maxLoopTry {
-			r.handlerError(fmt.Errorf("[%s] keepAlive name:%s, key:%v, leaseID:%v, break and exited, over max loopCount:%v",
-				moduleName, r.config.Name, key, r.leaseID, r.maxLoopTry))
-			break loop
+			for rsp := range reps {
+				if rsp == nil {
+					continue
+				}
+				r.handlerMsg(fmt.Sprintf("[%s] keepAlive name:%s, key:%s, leaseID:%v, startupTime:%s, uptime:%v, revision:%v, raft_term:%v",
+					moduleName, r.config.Name, key, r.leaseID, r.startupTime(), r.uptime(), rsp.GetRevision(), rsp.GetRaftTerm()))
+			}
+			return nil
 		}
 
-		r.handlerMsg(fmt.Sprintf("[%s] keepAlive enter loop:%v, maxLoopTry:%v, name:%s, key:%s, err:%v", moduleName, loopCount, r.maxLoopTry, r.config.Name, key, err))
-
-		err = aliveDeal()
-		if err != nil {
-			r.handlerError(fmt.Errorf("[%s] keepAlive name:%s, key:%v, leaseID:%v, err:%w", moduleName, r.config.Name, key, r.leaseID, err))
+		// only first KeepAlive error will return
+		if err = aliveDeal(); err != nil {
+			goto out
 		}
 
-		select {
-		case <-r.closed:
-			rsp, err := r.client.Delete(context.Background(), key)
-			r.handlerMsg(fmt.Sprintf("[%s] keepAlive close and delete name:%s, key:%s, err:%v, response:%v", moduleName, r.config.Name, key, err, rsp))
-			break loop
-		default:
-		}
-		// reset after long time, no loop try
-		latestNoLoopDeltaTime := time.Now().Sub(r.latestLoopTryTime)
-		if latestNoLoopDeltaTime > r.deltaResetTimeDuration {
-			r.curLoopTry.Store(0)
-			r.handlerMsg(fmt.Sprintf("[%s] keepAlive reset curLoopTry name:%s, key:%s, latestNoLoopDeltaTime:%v more than r.deltaResetTimeDuration:%v",
-				moduleName, r.config.Name, key, latestNoLoopDeltaTime, r.deltaResetTimeDuration))
-		}
+	loop:
+		for {
+			r.latestLoopTryTime = time.Now()
+			r.curLoopTry.Add(1)
+			loopCount := r.curLoopTry.Load()
+			if loopCount > r.maxLoopTry {
+				r.handlerError(fmt.Errorf("[%s] keepAlive name:%s, key:%v, leaseID:%v, break and exited, over max loopCount:%v",
+					moduleName, r.config.Name, key, r.leaseID, r.maxLoopTry))
+				break loop
+			}
 
-		if r.client == nil {
-			err = r.reConnectEtcd()
-			r.handlerMsg(fmt.Sprintf("[%s] keepAlive reConnectEtcd curLoopTry:%v, name:%s, key:%s, err:%v", moduleName, r.curLoopTry, r.config.Name, key, err))
-		}
+			select {
+			case <-r.closed:
+				rsp, err := r.client.Delete(context.Background(), key)
+				r.handlerMsg(fmt.Sprintf("[%s] keepAlive close and delete name:%s, key:%s, err:%v, response:%v", moduleName, r.config.Name, key, err, rsp))
+				break loop
+			default:
+				if r.client == nil {
+					err = r.reConnectEtcd()
+					r.handlerMsg(fmt.Sprintf("[%s] keepAlive reConnectEtcd curLoopTry:%v, name:%s, key:%s, err:%v", moduleName, r.curLoopTry, r.config.Name, key, err))
+				}
+			}
 
-	}
-	r.handlerMsg(fmt.Sprintf("[%s] keepAlive break loop and exit name:%s, key:%s, err:%v", moduleName, r.config.Name, key, err))
+			r.handlerMsg(fmt.Sprintf("[%s] keepAlive enter loop:%v, maxLoopTry:%v, name:%s, key:%s, err:%v", moduleName, loopCount, r.maxLoopTry, r.config.Name, key, err))
+
+			err = aliveDeal()
+			if err != nil {
+				r.handlerError(fmt.Errorf("[%s] keepAlive name:%s, key:%v, leaseID:%v, err:%w", moduleName, r.config.Name, key, r.leaseID, err))
+			}
+
+			// reset after long time, no loop try
+			latestNoLoopDeltaTime := time.Now().Sub(r.latestLoopTryTime)
+			if latestNoLoopDeltaTime > r.deltaResetTimeDuration {
+				r.curLoopTry.Store(0)
+				r.handlerMsg(fmt.Sprintf("[%s] keepAlive reset curLoopTry name:%s, key:%s, latestNoLoopDeltaTime:%v more than r.deltaResetTimeDuration:%v",
+					moduleName, r.config.Name, key, latestNoLoopDeltaTime, r.deltaResetTimeDuration))
+			}
+			time.Sleep(r.config.KeepAlive.Interval*2/3 + 1)
+		}
+	out:
+		r.handlerMsg(fmt.Sprintf("[%s] keepAlive break loop and exit name:%s, key:%s, err:%v", moduleName, r.config.Name, key, err))
+	}()
+
 	return err
 }
 
