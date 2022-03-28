@@ -298,12 +298,13 @@ func (r *discover) initHandlerAndLogger() {
 		r.config.Return.Errors = false
 	}
 
-	if r.config.Return.Messages && r.config.MessagesHandler != nil {
+	if r.config.Return.Messages && r.config.MessagesHandler != nil || r.config.ReturnResolve && r.config.AddressesParser != nil {
 		go func() {
 			r.config.MessagesHandler(r.messages)
 		}()
 	} else {
 		r.config.Return.Messages = false
+		r.config.ReturnResolve = false
 	}
 
 	if (!r.config.Return.Messages || !r.config.Return.Errors) && r.config.Logger == nil {
