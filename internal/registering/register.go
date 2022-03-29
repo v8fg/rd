@@ -7,6 +7,7 @@ import (
 
 	clientV3 "go.etcd.io/etcd/client/v3"
 
+	"github.com/v8fg/rd/config"
 	"github.com/v8fg/rd/internal/registering/etcd"
 )
 
@@ -50,7 +51,7 @@ func (r *RegisterRegistry) Info() string {
 
 // Register the service with some configurations. You can pass the etcd client or only pass the related config items.
 // registry key: name or key, the name preferred.
-func (r *RegisterRegistry) Register(config *etcd.Config, client *clientV3.Client, etcdConfig *clientV3.Config) error {
+func (r *RegisterRegistry) Register(config *config.RegisterConfig, client *clientV3.Client, etcdConfig *clientV3.Config) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

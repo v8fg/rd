@@ -3,6 +3,7 @@ package rd
 import (
 	clientV3 "go.etcd.io/etcd/client/v3"
 
+	"github.com/v8fg/rd/config"
 	"github.com/v8fg/rd/internal/discovering"
 )
 
@@ -15,9 +16,8 @@ func init() {
 
 // DiscoverEtcd etcd discover with some configurations.
 // registry key: name or key, the name preferred.
-func DiscoverEtcd(config *DiscoverConfig, client *clientV3.Client, etcdConfig *clientV3.Config) error {
-	_cfg := convertDiscoverConfigToInternalETCDDiscoverConfig(config)
-	return discoverRegistry.Register(_cfg, client, etcdConfig)
+func DiscoverEtcd(config *config.DiscoverConfig, client *clientV3.Client, etcdConfig *clientV3.Config) error {
+	return discoverRegistry.Register(config, client, etcdConfig)
 }
 
 // DiscoverInfo return the basic info about discover: key and discover addr.

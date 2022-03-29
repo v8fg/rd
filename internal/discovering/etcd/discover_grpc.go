@@ -12,40 +12,42 @@ import (
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientV3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc/resolver"
+
+	"github.com/v8fg/rd/config"
 )
 
 const moduleName = "discover-etcd-grpc"
 
 type none struct{}
 
-type Config struct {
-	Name    string // the name for registry store the instance, unique. If empty will use the combine: Scheme, Service replace.
-	Scheme  string // register resolver with name scheme, like: services
-	Service string // service name, like: test/v1.0/grpc
-
-	ReturnResolve     bool // if true, will output Resolve info to messages.
-	ChannelBufferSize int  // default 256, for errors or messages channel
-
-	// Return specifies what will be populated. If they are set to true,
-	// you must read from them to prevent deadlock.
-	Return struct {
-		// If enabled, any errors that occurred while consuming are returned on
-		// the Errors channel (default disabled).
-		Errors bool
-		// If enabled, any messages that occurred while consuming are returned on
-		// the Messages channel (default disabled).
-		Messages bool
-	}
-	ErrorsHandler   func(err <-chan error)               // consume errors, if not set drop.
-	MessagesHandler func(string <-chan string)           // consume messages expect errors, if not set drop.
-	AddressesParser func(string, []byte) (string, error) // parse address, k string, val []byte, return address string.
-	Logger          *log.Logger                          // shall not set, use for debug
-}
+// type Config struct {
+// 	Name    string // the name for registry store the instance, unique. If empty will use the combine: Scheme, Service replace.
+// 	Scheme  string // register resolver with name scheme, like: services
+// 	Service string // service name, like: test/v1.0/grpc
+//
+// 	ReturnResolve     bool // if true, will output Resolve info to messages.
+// 	ChannelBufferSize int  // default 256, for errors or messages channel
+//
+// 	// Return specifies what will be populated. If they are set to true,
+// 	// you must read from them to prevent deadlock.
+// 	Return struct {
+// 		// If enabled, any errors that occurred while consuming are returned on
+// 		// the Errors channel (default disabled).
+// 		Errors bool
+// 		// If enabled, any messages that occurred while consuming are returned on
+// 		// the Messages channel (default disabled).
+// 		Messages bool
+// 	}
+// 	ErrorsHandler   func(err <-chan error)               // consume errors, if not set drop.
+// 	MessagesHandler func(string <-chan string)           // consume messages expect errors, if not set drop.
+// 	AddressesParser func(string, []byte) (string, error) // parse address, k string, val []byte, return address string.
+// 	Logger          *log.Logger                          // shall not set, use for debug
+// }
 
 // discover for etcd
 type discover struct {
 	client   *clientV3.Client
-	config   *Config
+	config   *config.DiscoverConfig
 	errors   chan error
 	messages chan string
 
@@ -63,7 +65,7 @@ type discover struct {
 	start          time.Time // used to calculate the time to the present
 }
 
-func newDiscover(client *clientV3.Client, config *Config) (*discover, error) {
+func newDiscover(client *clientV3.Client, config *config.DiscoverConfig) (*discover, error) {
 	return &discover{
 		client:   client,
 		config:   config,
@@ -75,7 +77,7 @@ func newDiscover(client *clientV3.Client, config *Config) (*discover, error) {
 	}, nil
 }
 
-func NewDiscover(config *Config, client *clientV3.Client, etcdConfig *clientV3.Config) (*discover, error) {
+func NewDiscover(config *config.DiscoverConfig, client *clientV3.Client, etcdConfig *clientV3.Config) (*discover, error) {
 	err := checkConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] NewDiscover err: %w", moduleName, err)
@@ -123,7 +125,7 @@ func newClient(config clientV3.Config) (*clientV3.Client, error) {
 	return client, err
 }
 
-func checkConfig(config *Config) error {
+func checkConfig(config *config.DiscoverConfig) error {
 	if config == nil {
 		return fmt.Errorf("[%s] checkConfig failed, config nil", moduleName)
 	}

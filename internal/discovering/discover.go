@@ -8,6 +8,7 @@ import (
 	clientV3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc/resolver"
 
+	"github.com/v8fg/rd/config"
 	"github.com/v8fg/rd/internal/discovering/etcd"
 )
 
@@ -65,7 +66,7 @@ func (r *DiscoverRegistry) Info() string {
 // }
 
 // Register the Discover for the service.
-func (r *DiscoverRegistry) Register(config *etcd.Config, client *clientV3.Client, etcdConfig *clientV3.Config) error {
+func (r *DiscoverRegistry) Register(config *config.DiscoverConfig, client *clientV3.Client, etcdConfig *clientV3.Config) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
