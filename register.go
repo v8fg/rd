@@ -5,6 +5,7 @@ import (
 
 	clientV3 "go.etcd.io/etcd/client/v3"
 
+	"github.com/v8fg/rd/config"
 	"github.com/v8fg/rd/internal/registering"
 )
 
@@ -17,9 +18,8 @@ func init() {
 
 // RegisterEtcd etcd register with some configurations.
 // registry key: name or key, the name preferred.
-func RegisterEtcd(config *RegisterConfig, client *clientV3.Client, etcdConfig *clientV3.Config) error {
-	_cfg := convertRegisterConfigToInternalETCDRegisterConfig(config)
-	return registerRegistry.Register(_cfg, client, etcdConfig)
+func RegisterEtcd(config *config.RegisterConfig, client *clientV3.Client, etcdConfig *clientV3.Config) error {
+	return registerRegistry.Register(config, client, etcdConfig)
 }
 
 // RegisterInfo return the basic info about register: key and register addr.

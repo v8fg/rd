@@ -12,6 +12,8 @@ import (
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientV3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/atomic"
+
+	"github.com/v8fg/rd/config"
 )
 
 const moduleName = "register-etcd"
@@ -53,7 +55,7 @@ type Config struct {
 
 type register struct {
 	client   *clientV3.Client
-	config   *Config
+	config   *config.RegisterConfig
 	errors   chan error
 	messages chan string
 
@@ -77,7 +79,7 @@ type register struct {
 	etcdConfig *clientV3.Config // can use reconnect, if you use config create the etcd client.
 }
 
-func newRegister(client *clientV3.Client, config *Config) (*register, error) {
+func newRegister(client *clientV3.Client, config *config.RegisterConfig) (*register, error) {
 	return &register{
 		client:                 client,
 		config:                 config,
@@ -94,7 +96,7 @@ func newRegister(client *clientV3.Client, config *Config) (*register, error) {
 
 // NewRegister creates a new register with the given configurations.
 // Input client preferred, if nil will create with etcdConfig.
-func NewRegister(config *Config, client *clientV3.Client, etcdConfig *clientV3.Config) (*register, error) {
+func NewRegister(config *config.RegisterConfig, client *clientV3.Client, etcdConfig *clientV3.Config) (*register, error) {
 	err := checkConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] NewRegister err: %w", moduleName, err)
@@ -155,7 +157,7 @@ func newClient(config clientV3.Config) (*clientV3.Client, error) {
 	return client, err
 }
 
-func checkConfig(config *Config) error {
+func checkConfig(config *config.RegisterConfig) error {
 	if config == nil {
 		return fmt.Errorf("[%s] checkConfig failed, config nil", moduleName)
 	}
